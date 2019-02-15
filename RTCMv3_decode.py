@@ -16,7 +16,11 @@ import satPosition, util, RTCMv2, positionEstimate
 
 from bitstring import BitStream
 
+import struct
+
 max_sats = 12
+
+rtcm_accept_msg = [1005, 1077, 1127, 1087, 1230, 4072]
 
 RTCMv3_PREAMBLE = 0xD3
 PRUNIT_GPS = 299792.458
@@ -383,15 +387,15 @@ def parse_rtcmv3(pkt):
 def RTCM_converter_thread(server, port, username, password, mountpoint, rtcm_callback = None):
     import subprocess
 
-    nt = subprocess.Popen(["./ntripclient",
+    """nt = subprocess.Popen(["./ntripclient",
                             "--server", server,
                             "--password", password,
                             "--user", username,
                             "--mountpoint", mountpoint ],
-                            stdout=subprocess.PIPE)
-
-    """nt = subprocess.Popen(["./ntrip.py", server, str(port), username, password, mountpoint],
                             stdout=subprocess.PIPE)"""
+
+    nt = subprocess.Popen(["./ntrip.py", server, str(port), username, password, mountpoint],
+                            stdout=subprocess.PIPE)
 
 
     if nt is None or nt.stdout is None:
@@ -409,6 +413,7 @@ def RTCM_converter_thread(server, port, username, password, mountpoint, rtcm_cal
             continue
 
         pack_stream = BitStream()
+        copy = BitStream()
 
         l1 = ord(sio.read(1))
         l2 = ord(sio.read(1))
@@ -425,13 +430,184 @@ def RTCM_converter_thread(server, port, username, password, mountpoint, rtcm_cal
             continue
 
         if True: #TODO check parity
-            for d in pkt:
-                pack_stream.append(bs.pack('uint:8',ord(d)))
+            pack_stream.append(bs.pack('uint:8', d))
+            pack_stream.append(bs.pack('2*uint:8', l1, l2))
+            for k in pkt:
+                pack_stream.append(bs.pack('uint:8',ord(k)))
+                copy.append(bs.pack('uint:8',ord(k)))
+            for l in parity:
+                pack_stream.append(bs.pack('uint:8',ord(l)))
+            #for d in pkt:
+            #    pack_stream.append(bs.pack('uint:8',ord(d)))
+            Type = copy.read(12).uint
+            print(Type)
+            if Type not in rtcm_accept_msg:
+                continue
+            if True:#"msg = parse_rtcmv3(pack_stream)"
+            
+                rtcm.reset()
+                for i in range(pkt_len + 3 + 3):
+                    rtcm.buf += struct.pack('B', pack_stream.read(8).uint)
 
-            msg = parse_rtcmv3(pack_stream)
+                msg = rtcm.buf                
+                
+                decode_1077(msg)
 
-            if msg is not None and rtcm_callback is not None:
-                rtcm_callback(msg)
+                if msg is not None and rtcm_callback is not None:
+                    rtcm_callback(msg)
+            #msg = parse_rtcmv3(pack_stream)
+
+            #if msg is not None and rtcm_callback is not None:
+            #    rtcm_callback(msg)
+
+def RTCM_converter_thread_2(server, port, username, password, mountpoint, rtcm_callback = None):
+    import subprocess
+
+    """nt = subprocess.Popen(["./ntripclient",
+                            "--server", server,
+                            "--password", password,
+                            "--user", username,
+                            "--mountpoint", mountpoint ],
+                            stdout=subprocess.PIPE)"""
+
+    nt = subprocess.Popen(["./ntrip.py", server, str(port), username, password, mountpoint],
+                            stdout=subprocess.PIPE)
+
+
+    if nt is None or nt.stdout is None:
+        indev = sys.stdin
+    else:
+        indev = nt.stdout
+
+    print("RTCM using input {}".format(indev))
+
+    while True:
+        sio = indev
+
+        d = ord(sio.read(1))
+        if d != RTCMv3_PREAMBLE:
+            continue
+
+        pack_stream = BitStream()
+        copy = BitStream()
+
+        l1 = ord(sio.read(1))
+        l2 = ord(sio.read(1))
+
+        pack_stream.append(bs.pack('2*uint:8', l1, l2))
+        aaa = pack_stream.read(6)
+        pkt_len = pack_stream.read(10).uint
+        pkt = sio.read(pkt_len)
+        parity = sio.read(3)
+
+        if len(pkt) != pkt_len:
+            print "Length error {} {}".format(len(pkt), pkt_len)
+            continue
+
+        if True: #TODO check parity
+            pack_stream.append(bs.pack('uint:8', d))
+            pack_stream.append(bs.pack('2*uint:8', l1, l2))
+            for k in pkt:
+                pack_stream.append(bs.pack('uint:8',ord(k)))
+            for l in parity:
+                pack_stream.append(bs.pack('uint:8',ord(l)))
+            #for d in pkt:
+            #    pack_stream.append(bs.pack('uint:8',ord(d)))
+            
+            preamble = pack_stream.read(8).uint
+            reserved = pack_stream.read(6).uint
+            message_length = pack_stream.read(10).uint
+            Type = pack_stream.read(12).uint
+            print(Type)
+            if Type != 1077:
+                continue
+
+            staid = pack_stream.read(12).uint
+            tow = pack_stream.read(30).uint
+            
+            sync = pack_stream.read(1).uint
+            iod = pack_stream.read(3).uint
+            time_s = pack_stream.read(7).uint
+            clk_str = pack_stream.read(2).uint
+            clk_ext = pack_stream.read(2).uint
+            smooth = pack_stream.read(1).uint
+            tint_s = pack_stream.read(3).uint
+ 
+            satmask = []
+            sigmask = []
+            cellmask = []
+
+            sats = []
+            sigs = []
+            ncell = 0
+
+            for j in range(64):
+              mk = pack_stream.read(1).uint
+              satmask.append(mk)
+              if mk:
+                sats.append(j)
+
+            for j in range(32):
+              mk = pack_stream.read(1).uint
+              sigmask.append(mk)
+              if mk:
+                sigs.append(j)
+
+            for j in range(len(sats)*len(sigs)):
+              mk = pack_stream.read(1).uint
+              cellmask.append(mk)
+              if mk:
+                ncell += 1
+
+            print(satmask)
+
+            rng = []
+            for j in range(len(sats)):
+              rng.append(pack_stream.read(8).uint)
+
+            ex = []
+            for j in range(len(sats)):
+              ex.append(pack_stream.read(4).uint)
+
+            rng_m = []
+            for j in range(len(sats)):
+              rng_m.append(pack_stream.read(10).uint)
+
+            rate = []
+            for j in range(len(sats)):
+              rate.append(pack_stream.read(14).uint)
+
+            prv = []
+            for j in range(ncell):
+              prv.append(pack_stream.read(20).uint)
+
+            cpv = []
+            for j in range(ncell):
+              cpv.append(pack_stream.read(24).uint)
+
+            lock = []
+            for j in range(ncell):
+              lock.append(pack_stream.read(10).uint)
+
+            half = []
+            for j in range(ncell):
+              half.append(pack_stream.read(1).uint)
+
+            cnr = []
+            for j in range(ncell):
+              cnr.append(pack_stream.read(10).uint)
+
+            rrv = []
+            for j in range(ncell):
+              rrv.append(pack_stream.read(15).uint)
+            
+
+            
+            
+             
+
+def decode_1077(msg):
+    print(ord(msg[0]))
 
 def run_RTCM_converter(server, port, user, passwd, mount, rtcm_callback=None, force_rxclk_correction=True):
     global correct_rxclk
@@ -439,14 +615,14 @@ def run_RTCM_converter(server, port, user, passwd, mount, rtcm_callback=None, fo
 
     correct_rxclk = force_rxclk_correction
 
-    t = threading.Thread(target=RTCM_converter_thread, args=(server, port, user, passwd, mount, rtcm_callback,))
+    t = threading.Thread(target=RTCM_converter_thread_2, args=(server, port, user, passwd, mount, rtcm_callback,))
     t.start()
 
 def _printer(p):
-    print(p)
+    a=0
+    #print(p)
 
 if __name__ == '__main__':
-    RTCM_converter_thread('192.104.43.25', 2101, sys.argv[1], sys.argv[2], 'TID10', _printer)
-
-
-
+    #RTCM_converter_thread('192.104.43.25', 2101, sys.argv[1], sys.argv[2], 'TID10', _printer)
+    #RTCM_converter_thread('rtk2go.com', 2101, "", "", 'yumo_3', _printer)
+    RTCM_converter_thread_2('rtk2go.com', 2101, "", "", 'TSUKUBA-RTCM3', _printer)

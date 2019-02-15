@@ -6,142 +6,102 @@ two receiver DGPS test code
 import ublox, sys, time, struct
 import ephemeris, util
 import RTCMv3_decode
-import nmea_wrapper
+import math
+
+import rospy
+from sensor_msgs.msg import NavSatFix    # ROS message form
+from nav_msgs.msg import Odometry
+from geometry_msgs.msg import TwistWithCovarianceStamped
 
 from optparse import OptionParser
 
-parser = OptionParser("dgps_test.py [options]")
-parser.add_option("--port2", help="serial port 2", default='/dev/ttyACM1')
-parser.add_option("--port3", help="serial port 3", default=None)
-parser.add_option("--baudrate", type='int',
-                  help="serial baud rate", default=38400)
-parser.add_option("--log2", help="log file2", default=None)
-parser.add_option("--log3", help="log file3", default=None)
-parser.add_option("--nmea-2", action='store_true', default=False, help='Port 2 is an NMEA receiver')
-parser.add_option("--nmea-3", action='store_true', default=False, help='Port 3 is an NMEA receiver')
-parser.add_option("--reopen", action='store_true', default=False, help='re-open on failure')
-parser.add_option("--nortcm", action='store_true', default=False, help="don't send RTCM to receiver2")
-parser.add_option("--reference", help="reference position (lat,lon,alt)")
-parser.add_option("--ecef-reference", help="reference position (X,Y,Z)")
-parser.add_option("--dynmodel2", type='int', default=ublox.DYNAMIC_MODEL_AIRBORNE4G, help="dynamic model for recv2")
-parser.add_option("--dynmodel3", type='int', default=ublox.DYNAMIC_MODEL_AIRBORNE4G, help="dynamic model for recv3")
-parser.add_option("--module-reset", action='store_true', help="cold start all the modules")
+i_navsatfix = [0,0] # sequence number of navsatfix
+i_odometry = [0,0]  # sequence number of odometry
+i_relpos = [0,0]  # sequence number of odometry
 
-parser.add_option("--ntrip-server")
+fix_status = [0,0]
+fix_tag =["float", "fix"]
+
+
+
+
+rospy.init_node("ublox_node")
+
+# ROS publisher initialize
+pub_leftnavsatfix = rospy.Publisher("left_gnss/fix", NavSatFix, queue_size = 2)
+pub_leftvel = rospy.Publisher('left_gnss/fix_vel', TwistWithCovarianceStamped, queue_size = 2)
+pub_leftrelpos = rospy.Publisher("left_gnss/relpos", Odometry, queue_size=2)
+pub_rightnavsatfix = rospy.Publisher("right_gnss/fix", NavSatFix, queue_size = 2)
+pub_rightvel = rospy.Publisher('right_gnss/fix_vel', TwistWithCovarianceStamped, queue_size = 2)
+pub_rightrelpos = rospy.Publisher("right_gnss/relpos", Odometry, queue_size=2)
+
+parser = OptionParser("dgps_test.py [options]")
+parser.add_option("--port1", help="serial port 1", default='/dev/serial/by-path/pci-0000:00:14.0-usb-0:1.1:1.0')
+parser.add_option("--port2", help="serial port 2", default='/dev/serial/by-path/pci-0000:00:14.0-usb-0:1.2:1.0')
+parser.add_option("--baudrate", type='int', help="serial baud rate", default=115200)
+parser.add_option("--log1", help="log file1", default=None)
+parser.add_option("--log2", help="log file2", default=None)
+parser.add_option("--reopen", action='store_true', default=False, help='re-open on failure')
+parser.add_option("--dynmodel1", type='int', default=ublox.DYNAMIC_MODEL_PEDESTRIAN, help="dynamic model for recv1")
+parser.add_option("--dynmodel2", type='int', default=ublox.DYNAMIC_MODEL_PEDESTRIAN, help="dynamic model for recv2")
+
+parser.add_option("--ntrip-server", default="RTK2go.com")
 parser.add_option("--ntrip-port", type='int', default=2101)
-parser.add_option("--ntrip-user")
-parser.add_option("--ntrip-password")
-parser.add_option("--ntrip-mount")
+parser.add_option("--ntrip-user", default="")
+parser.add_option("--ntrip-password", default = "")
+parser.add_option("--ntrip-mount", default = "HOSEI-RTCM3")
 
 (opts, args) = parser.parse_args()
 
-if opts.reference is not None:
-    reference_position = util.ParseLLH(opts.reference).ToECEF()
-elif opts.ecef_reference is not None:
-    reference_position = util.PosVector(*opts.ecef_reference.split(','))
-else:
-    reference_position = None
-
-def setup_port(port, log, append=False):
-    dev = ublox.UBlox(port, baudrate=opts.baudrate, timeout=0.01)
-    dev.set_logfile(log, append=append)
-    dev.set_binary()
-    dev.configure_poll_port()
-    dev.configure_poll(ublox.CLASS_CFG, ublox.MSG_CFG_USB)
-    dev.configure_poll(ublox.CLASS_CFG, ublox.MSG_CFG_NAVX5)
-    dev.configure_poll(ublox.CLASS_MON, ublox.MSG_MON_HW)
-    dev.configure_poll(ublox.CLASS_NAV, ublox.MSG_NAV_DGPS)
-    dev.configure_poll(ublox.CLASS_MON, ublox.MSG_MON_VER)
-    dev.configure_port(port=ublox.PORT_SERIAL1, inMask=0x7, outMask=1)
-    dev.configure_port(port=ublox.PORT_USB, inMask=0x7, outMask=1)
-    dev.configure_port(port=ublox.PORT_SERIAL2, inMask=0x7, outMask=1)
-    dev.configure_poll_port()
-    dev.configure_poll_port(ublox.PORT_SERIAL1)
-    dev.configure_poll_port(ublox.PORT_SERIAL2)
-    dev.configure_poll_port(ublox.PORT_USB)
-    return dev
-
-if opts.nmea_2:
-    dev2 = nmea_wrapper.NMEAModule(opts.port2, opts.baudrate)
-    dev2.set_logfile(opts.log2)
-else:
-    dev2 = setup_port(opts.port2, opts.log2)
-
-if opts.port3 is not None:
-    if opts.nmea_3:
-        dev3 = nmea_wrapper.NMEAModule(opts.port3, opts.baudrate)
-        dev3.set_logfile(opts.log3)
+def setup_port(port1, port2, log1, log2, append=False):
+    if (port1!=None):
+        dev1 = ublox.UBlox(port1, baudrate=opts.baudrate, timeout=0.1)
+        #dev1.set_preferred_dynamic_model(opts.dynmodel1)
+        #dev1.set_logfile(log1, append=append)
+        #dev1.set_binary()
+        #dev1.configure_poll_port()
+        #dev1.configure_poll(ublox.CLASS_CFG, ublox.MSG_CFG_USB)
+        #dev1.configure_poll(ublox.CLASS_CFG, ublox.MSG_CFG_NAVX5)
+        #dev1.configure_poll(ublox.CLASS_MON, ublox.MSG_MON_HW)
+        #dev1.configure_poll(ublox.CLASS_NAV, ublox.MSG_NAV_DGPS)
+        #dev1.configure_poll(ublox.CLASS_MON, ublox.MSG_MON_VER)
+        #dev1.configure_port_USB()
+        #dev1.configure_solution_rate(rate_ms=200)
+        #dev1.configure_port(port=ublox.PORT_USB, inMask=32, outMask=1)
+        #dev1.configure_loadsave(clearMask=0, saveMask=7967, loadMask=0, deviceMask=23)
+        #dev1.configure_poll_port()
+        #dev1.configure_poll_port(ublox.PORT_USB)
     else:
-        dev3 = setup_port(opts.port3, opts.log3)
-else:
-    dev3 = None
-
-last_msg2_time = time.time()
-last_msg3_time = time.time()
-
-rx2_pos = None
-rx3_pos = None
-
-if opts.module_reset:
-    dev2.module_reset(ublox.RESET_COLD, ublox.RESET_HW)
-
-    if dev3 is not None:
-        dev3.module_reset(ublox.RESET_COLD, ublox.RESET_HW)
-
-    time.sleep(1)
-    dev2.close()
-
-    if dev3 is not None:
-        dev3.close()
-
-    time.sleep(1)
-
-    if opts.nmea_2:
-        dev2 = None
+        print("Please set a 1st port of ublox device.")
+        return
+        
+    if (port2!=None):
+    #if (False):
+        dev2 = ublox.UBlox(port2, baudrate=opts.baudrate, timeout=0.1)
+        #dev2.set_preferred_dynamic_model(opts.dynmodel2)
+        #dev2.set_logfile(log2, append=append)
+        #dev2.set_binary()
+        #dev2.configure_poll_port()
+        #dev2.configure_poll(ublox.CLASS_CFG, ublox.MSG_CFG_USB)
+        #dev2.configure_poll(ublox.CLASS_CFG, ublox.MSG_CFG_NAVX5)
+        #dev2.configure_poll(ublox.CLASS_MON, ublox.MSG_MON_HW)
+        #dev2.configure_poll(ublox.CLASS_NAV, ublox.MSG_NAV_DGPS)
+        #dev2.configure_poll(ublox.CLASS_MON, ublox.MSG_MON_VER)
+        #dev2.configure_solution_rate(rate_ms=200)
+        #dev2.configure_port(port=ublox.PORT_USB, inMask=32, outMask=1)
+        #dev2.configure_poll_port()
+        #dev2.configure_poll_port(ublox.PORT_USB)
+        
+        return dev1, dev2
     else:
-        dev2 = setup_port(opts.port2, opts.log2)
-
-    if opts.port3 is not None:
-        if opts.nmea_3:
-            dev3 = None
-        else:
-            dev3 = setup_port(opts.port3, opts.log3)
-    else:
-        dev3 = None
+        print("localization will be done with a device.")
+        return dev1, None
+    
 
 
-if not opts.nmea_2:
-    dev2.configure_message_rate(ublox.CLASS_NAV, ublox.MSG_NAV_POSLLH, 1)
-    dev2.configure_message_rate(ublox.CLASS_NAV, ublox.MSG_NAV_POSECEF, 1)
-    dev2.configure_message_rate(ublox.CLASS_NAV, ublox.MSG_NAV_DGPS, 1)
-    dev2.configure_message_rate(ublox.CLASS_NAV, ublox.MSG_NAV_SVINFO, 1)
-    dev2.configure_message_rate(ublox.CLASS_NAV, ublox.MSG_NAV_VELECEF, 0)
-    dev2.configure_message_rate(ublox.CLASS_NAV, ublox.MSG_NAV_VELNED, 0)
-    dev2.configure_message_rate(ublox.CLASS_NAV, ublox.MSG_NAV_SOL, 1)
-    dev2.configure_message_rate(ublox.CLASS_RXM, ublox.MSG_RXM_SVSI, 0)
-    dev2.configure_solution_rate(rate_ms=1000)
 
-if dev3 is not None and not opts.nmea_3:
-    dev3.configure_message_rate(ublox.CLASS_NAV, ublox.MSG_NAV_POSLLH, 1)
-    dev3.configure_message_rate(ublox.CLASS_NAV, ublox.MSG_NAV_POSECEF, 1)
-    dev3.configure_message_rate(ublox.CLASS_NAV, ublox.MSG_NAV_SVINFO, 0)
-    dev3.configure_message_rate(ublox.CLASS_NAV, ublox.MSG_NAV_VELECEF, 0)
-    dev3.configure_message_rate(ublox.CLASS_NAV, ublox.MSG_NAV_VELNED, 0)
-    dev3.configure_message_rate(ublox.CLASS_NAV, ublox.MSG_NAV_SOL, 1)
-    dev3.configure_message_rate(ublox.CLASS_RXM, ublox.MSG_RXM_SVSI, 0)
-    dev3.configure_solution_rate(rate_ms=1000)
-
-# we want the ground station to use a stationary model, and the roving
-# GPS to use a highly dynamic model
-if not opts.nmea_2:
-    dev2.set_preferred_dynamic_model(opts.dynmodel2)
-    dev2.set_preferred_dgps_timeout(60)
-
-if dev3 is not None and not opts.nmea_3:
-    dev3.set_preferred_dynamic_model(opts.dynmodel3)
-
-errlog = open(time.strftime('errlog-%y%m%d-%H%M.txt'), mode='w')
-errlog.write("normal DGPS normal-XY DGPS-XY\n")
+#errlog = open(time.strftime('errlog-%y%m%d-%H%M.txt'), mode='w')
+#errlog.write("normal DGPS normal-XY DGPS-XY\n")
 
 def display_diff(name, pos1, pos2):
     print("%13s err: %6.2f errXY: %6.2f pos=%s" % (name, pos1.distance(pos2), pos1.distanceXY(pos2), pos1.ToLLH()))
@@ -168,43 +128,228 @@ def handle_device2(msg):
                 reference_position.distanceXY(rx2_pos)))
             errlog.flush()
 
-def handle_device3(msg):
-    global rx3_pos
+def handle_device(msg, num):
     '''handle message from uncorrected rover GPS'''
-    if msg.name() == "NAV_POSECEF":
+    if msg.name() == "NAV_HPPOSLLH":
         msg.unpack()
-        pos = util.PosVector(msg.ecefX*0.01, msg.ecefY*0.01, msg.ecefZ*0.01)
-        rx3_pos = pos
-                                            
+        publish_navsatfix(msg, num)
+        return
+        
+    elif msg.name() == "NAV_VELNED":
+        msg.unpack()
+        publish_velocity(msg, num)
+        return
+
+    elif msg.name() == "RXM_RTCM":
+        msg.unpack()
+        #print("RTCM status is " + str(msg.flag))
+
+    if msg.name() == 'NAV_DGPS':
+        msg.unpack()
+        print("DGPS: age=%u numCh=%u" % (msg.age, msg.numCh))
+
+    elif msg.name() == "NAV_PVT":
+        msg.unpack()
+        set_fix_status(msg, num)
+    elif msg.name() == 'MON_MSGPP':
+        msg.unpack()
+        #print("msg:   usb_port:%u, %u, %u, %u, %u, %u, %u, %u" % (msg.msg4[0], msg.msg4[1], msg.msg4[2], msg.msg4[3], msg.msg4[4], msg.msg4[5], msg.msg4[6], msg.msg4[7]))
+        #print("       skipped:%u, %u, %u, %u, %u, %u" % (msg.skipped[0], msg.skipped[1], msg.skipped[2], msg.skipped[3], msg.skipped[4], msg.skipped[5]))
+    elif msg.name() == 'NAV_SVINFO':
+        check_isVisible(msg,num)
+    elif msg.name() == 'NAV_RELPOSNED':
+        msg.unpack()
+        publish_relpos(msg, num)
+                
+    return
+
+def publish_navsatfix(msg,num):
+
+    global i_navsatfix
+    
+    if msg.name() != 'NAV_HPPOSLLH':
+        print "error: invalid type of message!!!!"
+        return
+        
+    navsatfix = NavSatFix()
+    navsatfix.header.stamp = rospy.Time.now()
+    if num == 1:
+        navsatfix.header.frame_id = "/left_gnss"
+    
+    elif num == 2:
+        navsatfix.header.frame_id = "/right_gnss"
+        
+    navsatfix.header.seq = i_navsatfix[num-1]
+    navsatfix.latitude = msg.Latitude * 1e-7 + msg.latHp * 1e-9
+    navsatfix.longitude = msg.Longitude * 1e-7 + msg.lonHp * 1e-9
+    navsatfix.altitude = msg.height * 1e-3 + msg.heightHp * 1e-4
+    navsatfix.position_covariance = [(msg.hAcc*1e-4)/math.sqrt(2.), 0, 0, 0, (msg.hAcc*1e-4)/math.sqrt(2.), 0, 0, 0, (msg.vAcc*1e-4)]
+    navsatfix.status.status = fix_status[num-1]
+    
+    if num == 1:
+        pub_leftnavsatfix.publish(navsatfix)
+        
+    elif num == 2:
+        pub_rightnavsatfix.publish(navsatfix)
+    
+    i_navsatfix[num-1] +=1
+    
+
+def publish_velocity(msg,num):
+
+    global i_odometry
+    
+    if msg.name() != 'NAV_VELNED':
+        print "error: invalid type of message!!"
+        return
+        
+    odometry =TwistWithCovarianceStamped()
+    odometry.header.stamp = rospy.Time.now()
+    if num == 1:
+        odometry.header.frame_id = "/left_gnss"
+    
+    elif num == 2:
+        odometry.header.frame_id = "/right_gnss"
+        
+    odometry.header.seq = i_odometry[num-1]
+    odometry.twist.twist.linear.x = msg.velE * 1e-2
+    odometry.twist.twist.linear.y = msg.velN * 1e-2
+    odometry.twist.twist.linear.z = -msg.velD * 1e-2
+    odometry.twist.covariance = [msg.sAcc * 1e-2/math.sqrt(3.), 0., 0., 0., 0., 0., 
+                                0., msg.sAcc * 1e-2/math.sqrt(3.), 0., 0., 0., 0., 
+                                0., 0., msg.sAcc * 1e-2/math.sqrt(3.), 0., 0., 0.,
+                                0., 0., 0., 0., 0., 0.,
+                                0., 0., 0., 0., 0., 0.,
+                                0., 0., 0., 0., 0., 0.]
+    
+    if num == 1:
+        pub_leftvel.publish(odometry)
+        
+    elif num == 2:
+        pub_rightvel.publish(odometry)
+    
+    i_odometry[num-1] +=1
+
+
+def publish_relpos(msg,num):
+
+    global i_relpos
+    if msg.name() != 'NAV_RELPOSNED':
+        print "error: invalid type of message!!"
+        return
+        
+    odometry = Odometry()
+    odometry.header.stamp = rospy.Time.now()
+    if num == 1:
+        odometry.header.frame_id = "/left_gnss"
+    
+    elif num == 2:
+        odometry.header.frame_id = "/right_gnss"
+        
+    odometry.header.seq = i_odometry[num-1]
+    odometry.pose.pose.position.x = msg.relPosE * 1e-2 + msg.relPosHPE * 1e-4
+    odometry.pose.pose.position.y = msg.relPosN * 1e-2 + msg.relPosHPN * 1e-4
+    odometry.pose.pose.position.z = -msg.relPosD * 1e-2 -msg.relPosHPD * 1e-4
+    odometry.pose.covariance = [msg.accE * 1e-4, 0., 0., 0., 0., 0., 
+                                0., msg.accN * 1e-4, 0., 0., 0., 0., 
+                                0., 0., msg.accD * 1e-4, 0., 0., 0.,
+                                0., 0., 0., 0., 0., 0.,
+                                0., 0., 0., 0., 0., 0.,
+                                0., 0., 0., 0., 0., 0.]
+    
+    if num == 1:
+        pub_leftrelpos.publish(odometry)
+        
+    elif num == 2:
+        pub_rightrelpos.publish(odometry)
+    
+    i_relpos[num-1] +=1
+
+
+def set_fix_status(msg, num):
+    global fix_status
+    bitfield = msg.flags
+    if bitfield >= 2**7:
+        fix_status[num-1]=1
+    else:
+        fix_status[num-1]=0
+    
+    string = "fix status: left :" + (fix_tag[fix_status[0]]) + ", right: " + (fix_tag[fix_status[1]])
+    print(string)
+
+def check_isVisible(msg,num):
+    numCh = msg.numCh
+    nonVisible = []
+    for n in range(numCh):
+      svid = msg.svid[n]
+      azim = msg.azim[n] * (math.pi/180.)
+      elev = msg.elev[n] * (math.pi/180.)
+
+      satellite_vector = attitude_matrix * np.matrix([[math.cos(elev)*math.sin(azim)],[math.cos(elev)*math.cos(azim)],[math.sin(elev)]])  
+      u, v = transpose_camera_to_image([satellite_vector[0][0], satellite_vector[1][0], satellite_vector[2][0]])
+      
+      if skyview(u,v) == 0:
+        nonVisible.append(svid)
+
+    return
+
+def transpose_camera_to_image(image_point):
+    if len(image_point) == 3
+      x = image_point[0]
+      y = image_point[1]
+      z = image_point[2]
+
+      u = cx + x * (fx/z)
+      v = cy - y * (fy/z)
+     
+      return u,v
+
+    elif len(image_point) == 2
+      x = image_point[0]
+      y = image_point[1]
+      
+      u = cx + x 
+      v = cy - y 
+    
+      return u, v
+    
+                                                
 def send_rtcm(msg):
-    print(msg)
-    dev2.write(msg)
+    try:
+        dev1.write(msg)
+        dev2.write(msg)
 
-RTCMv3_decode.run_RTCM_converter(opts.ntrip_server, opts.ntrip_port, opts.ntrip_user, opts.ntrip_password, opts.ntrip_mount, rtcm_callback=send_rtcm)
+    except:
+        pass
 
-while True:
+def filter_rtcm(msg):
+    nonVisible
+    
+    
+    
+def receiver_thread(dev, num=1):
+    while True:
     # get a message from the reference GPS
-    msg = dev2.receive_message_noerror()
-    if msg is not None:
-        handle_device2(msg)
-        last_msg2_time = time.time()
-
-    if dev3 is not None:
-        msg = dev3.receive_message_noerror()
+        msg = dev.receive_message_noerror()
+        #print("hello world")
         if msg is not None:
-            handle_device3(msg)
-            last_msg3_time = time.time()
+            handle_device(msg, num)
+            last_msg_time = time.time()
 
-    if opts.reopen and time.time() > last_msg2_time + 5:
-        dev2.close()
-        dev2 = setup_port(opts.port2, opts.log2, append=True)
-        last_msg2_time = time.time()
-        sys.stdout.write('R2')
+        sys.stdout.flush()
 
-    if dev3 is not None and opts.reopen and time.time() > last_msg3_time + 5:
-        dev3.close()
-        dev3 = setup_port(opts.port3, opts.log3, append=True)
-        last_msg3_time = time.time()
-        sys.stdout.write('R3')
+def run_receiver_thread(dev, num):
+    import threading
 
-    sys.stdout.flush()
+    t = threading.Thread(target=receiver_thread, args=(dev, num))
+    t.start()
+
+dev1, dev2 = setup_port(opts.port1, opts.port2, opts.log1, opts.log2)
+
+  #RTCMv3_decode.run_RTCM_converter(opts.ntrip_server, opts.ntrip_port, opts.ntrip_user, opts.ntrip_password, opts.ntrip_mount,    rtcm_callback=send_rtcm)
+RTCMv3_decode.run_RTCM_converter('RTK2go.com', 2101, '', '', 'yumo', rtcm_callback=send_rtcm)
+
+run_receiver_thread(dev1, 1)
+run_receiver_thread(dev2, 2)
+
+

@@ -97,6 +97,22 @@ class RTCMBits:
         self.rtcword = 0
         self.rtcbits = 0
 
+    def addbits_(self, nbits, value):
+        bit_value = bin(value)
+        bit_length  = len(bit_value) - 2
+        diff = bit_length- nbits
+        if diff < 0:
+            for i in range(-diff):
+                self.buf += "0"
+            for i in range(bit_length):
+                self.buf += bit_value[i + 2]
+
+        else:
+            for i in range(nbits):
+                self.buf += bit_value[2 + diff + i]
+        
+        
+
     def xor_bits(self, word, bits):
         '''xor a set of bits from a word'''
         ret = 0
@@ -393,6 +409,101 @@ class RTCMBits:
 
         while self.rtcbits != 0:
             self.addbits(8, 0xAA) # pad unused bits with 0xAA
+        return self.buf + "\n\r"
+
+    def RTCMType1005_step(self, staid, itrf, X, Y, Z):
+        self.reset()
+
+        #rtcmzcount = self.modZCount()
+        ## %24
+        self.addbits(8, 0xD3)  # header id
+        self.addbits(6, 0)     # 
+        self.addbits(10, 0)    # 
+
+        ## %24
+        self.addbits(12, 1005) # message_no
+        self.addbits(12, staid) # ref station id
+        ## %24
+        self.addbits(6, itrf) # itrf realization year
+        self.addbits(1, 1) # gps indicater
+        self.addbits(1, 1) # glonass indicater
+        self.addbits(1, 0) # galileo indicater
+        self.addbits(1, 0) # ref station indicater
+
+        self.addbits(6, (X>>32)&0x3F) # anntena ref point ecef-x
+        self.addbits(8, (X>>24)&0xFF)
+        ## %24
+        self.addbits(8, (X>>16)&0xFF)
+        self.addbits(8, (X>> 8)&0xFF)
+        self.addbits(8, (X>> 0)&0xFF)
+        ## %24
+        self.addbits(1, 1) # oscilliator indicater
+        self.addbits(1, 0) # oscilliator indicater
+        self.addbits(6, (Y>>32)&0x3F) # anntena ref point ecef-y
+        self.addbits(8, (Y>>24)&0xFF)
+        self.addbits(8, (Y>>16)&0xFF)
+        ## %24
+        self.addbits(8, (Y>> 8)&0xFF)
+        self.addbits(8, (Y>> 0)&0xFF) 
+        self.addbits(2, 0) # auter cycle indicater
+        self.addbits(6, (Z>>32)&0x3F) # anntena ref point ecef-x
+        ## %24
+        self.addbits(8, (Z>>24)&0xFF)
+        self.addbits(8, (Z>>16)&0xFF)
+        self.addbits(8, (Z>> 8)&0xFF)
+        ## %24
+        self.addbits(6, (Z>> 0)&0x3F)
+
+        while self.rtcbits != 0:
+            self.addbits(8, 0xAA) # pad unused bits with 0xAA
+
+        return self.buf + "\n\r"
+        
+        
+    def RTCMType1077_step(self, staid, itrf, X, Y, Z):
+        print("oops!!")
+        self.reset()
+
+        #rtcmzcount = self.modZCount()
+        ## %24
+        self.addbits(8, 0xD3)  # header id
+        self.addbits(6, 0)     # 
+        self.addbits(10, 0)    # 
+        
+        ## %24
+        self.addbits(12, 1077) # message_no
+        self.addbits(12, 0)#staid) # ref station id
+        ## %24
+        self.addbits(30, tow) # epoch time
+        self.addbits(1, sync) # multiple message bit
+        self.addbits(3, iod) # issue of data station
+        self.addbits(7, 0) # reserved
+        self.addbits(2, 0) # clock streering indicator
+        self.addbits(2, 0) # external clock indicator
+        self.addbits(1, 0) # smoothing indicator
+        self.addbits(3, 0) # smoothing interval
+
+        for j in range(64):
+            if(sats[j]):
+                self.addbits(1, 1)
+            else:
+                self.addbits(1, 0)
+                
+        for j in range(32):
+            if(sigs[j]):
+                self.addbits(1, 1)
+            else:
+                self.addbits(1, 0)
+                
+        for j in range(len(sats)*len(sigs)):
+            self.addbits(1, cellmask[j])
+            
+        for j in range(len(sats)):
+            if (r[j]!=0.0):
+                self.addbits(8, uint(r[j]/RANGE_MS))
+            else:
+                self.addbits(8, 255)
+
         return self.buf + "\n\r"
 
 
